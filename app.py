@@ -58,17 +58,125 @@ TIPO_COLORS = {
     "Colaboración frecuente": "#f97316",
 }
 
+# ----------------------------------------------------------------------------
+# CONFIGURACIÓN: pega aquí los links de "Publicar en la web > CSV" de tus
+# Google Sheets (los que reciben las respuestas de los Google Forms).
+# Si los dejas vacíos, la app usa los CSV locales (investigadores.csv /
+# colaboraciones.csv) como semilla inicial.
+# ----------------------------------------------------------------------------
+INVESTIGADORES_SHEET_URL = ""   # ej: "https://docs.google.com/spreadsheets/d/.../pub?output=csv"
+COLABORACIONES_SHEET_URL = ""   # ej: "https://docs.google.com/spreadsheets/d/.../pub?output=csv"
+
+# Coordenadas conocidas por institución (alta precisión)
+INSTITUCION_COORDS = {
+    "Universidad Austral de Chile": (-39.815, -73.245),
+    "Universidad San Sebastián": (-39.808, -73.238),
+    "Universidad Santo Tomás": (-39.818, -73.245),
+    "Universidad Católica de la Santísima Concepción": (-36.758, -73.064),
+    "Universidad de Concepción": (-36.770, -73.050),
+    "Universidad Mayor": (-33.437, -70.650),
+    "Universidad Adventista de Chile": (-36.565, -72.096),
+    "Viña del Mar University": (-33.015, -71.551),
+    "Universitat de Barcelona": (41.385, 2.173),
+    "Universitat de les Illes Balears": (39.637, 2.648),
+    "University of Tokyo": (35.713, 139.762),
+    "University of Lagos": (6.517, 3.397),
+    "Indian Institute of Technology Delhi": (28.545, 77.193),
+    "University of Athens": (37.983, 23.728),
+}
+
+# Centroides por país (fallback cuando la institución no está en el diccionario)
+PAIS_CENTROIDS = {
+    "Chile": (-35.675, -71.543),
+    "Argentina": (-38.416, -63.617),
+    "Perú": (-9.190, -75.015),
+    "Bolivia": (-16.290, -63.589),
+    "Brasil": (-14.235, -51.925),
+    "Colombia": (4.571, -74.297),
+    "México": (23.634, -102.553),
+    "España": (40.463, -3.749),
+    "Estados Unidos": (37.090, -95.712),
+    "Reino Unido": (55.378, -3.436),
+    "Francia": (46.228, 2.214),
+    "Alemania": (51.166, 10.452),
+    "Italia": (41.872, 12.567),
+    "Portugal": (39.399, -8.224),
+    "Japón": (36.205, 138.253),
+    "China": (35.862, 104.195),
+    "India": (20.594, 78.963),
+    "Nigeria": (9.082, 8.675),
+    "Sudáfrica": (-30.559, 22.937),
+    "Australia": (-25.274, 133.775),
+    "Canadá": (56.130, -106.347),
+    "Grecia": (39.075, 21.825),
+}
+
+
+def jitter(nombre, escala=1.2):
+    """Desplazamiento pequeño y determinístico para que puntos en la misma
+    institución/país no queden exactamente apilados."""
+    h = abs(hash(nombre))
+    dx = ((h % 1000) / 1000 - 0.5) * escala
+    dy = (((h // 1000) % 1000) / 1000 - 0.5) * escala
+    return dx, dy
+
+
+def resolver_coords(row):
+    """Si ya viene Lat/Lon en los datos, se respeta. Si no, se busca por
+    institución; si tampoco, por país; si nada calza, queda cerca de (0,0)."""
+    lat, lon = row.get("Lat"), row.get("Lon")
+    if pd.notna(lat) and pd.notna(lon):
+        return float(lat), float(lon)
+
+    inst = str(row.get("Institucion", ""))
+    if inst in INSTITUCION_COORDS:
+        base_lat, base_lon = INSTITUCION_COORDS[inst]
+        dx, dy = jitter(row["Nombre"], escala=0.05)
+        return base_lat + dx, base_lon + dy
+
+    pais = str(row.get("Pais", ""))
+    if pais in PAIS_CENTROIDS:
+        base_lat, base_lon = PAIS_CENTROIDS[pais]
+        dx, dy = jitter(row["Nombre"], escala=2.0)
+        return base_lat + dx, base_lon + dy
+
+    dx, dy = jitter(row["Nombre"], escala=10.0)
+    return dx, dy
+
 
 # ----------------------------------------------------------------------------
 # Datos
 # ----------------------------------------------------------------------------
-@st.cache_data
+@st.cache_data(ttl=300)  # se refresca cada 5 minutos para traer nuevos registros
 def load_data():
-    investigadores = pd.read_csv("investigadores.csv")
-    try:
-        colaboraciones = pd.read_csv("colaboraciones.csv")
-    except FileNotFoundError:
-        colaboraciones = pd.DataFrame(columns=["Investigador_A", "Investigador_B", "Tipo"])
+    if INVESTIGADORES_SHEET_URL:
+        investigadores = pd.read_csv(INVESTIGADORES_SHEET_URL)
+    else:
+        investigadores = pd.read_csv("investigadores.csv")
+
+    if COLABORACIONES_SHEET_URL:
+        colaboraciones = pd.read_csv(COLABORACIONES_SHEET_URL)
+    else:
+        try:
+            colaboraciones = pd.read_csv("colaboraciones.csv")
+        except FileNotFoundError:
+            colaboraciones = pd.DataFrame(columns=["Investigador_A", "Investigador_B", "Tipo"])
+
+    # Si no vienen columnas Lat/Lon (típico en respuestas de Google Forms),
+    # se crean vacías para que resolver_coords las complete.
+    if "Lat" not in investigadores.columns:
+        investigadores["Lat"] = pd.NA
+    if "Lon" not in investigadores.columns:
+        investigadores["Lon"] = pd.NA
+
+    coords = investigadores.apply(resolver_coords, axis=1, result_type="expand")
+    investigadores["Lat"], investigadores["Lon"] = coords[0], coords[1]
+
+    for col in ["Publicaciones", "Proyectos"]:
+        if col not in investigadores.columns:
+            investigadores[col] = 0
+        investigadores[col] = pd.to_numeric(investigadores[col], errors="coerce").fillna(0)
+
     return investigadores, colaboraciones
 
 
